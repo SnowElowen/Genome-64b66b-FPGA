@@ -1,0 +1,42 @@
+name: SnowGenome RTL CI
+
+on:
+  push:
+    branches:
+      - main
+      - agent/vector16-v0.2
+  pull_request:
+
+jobs:
+  vector16-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Compile RTL and testbench
+        run: |
+          iverilog -g2012 -Wall \
+            -s tb_snowgenome_top \
+            -o snowgenome_simv \
+            rtl/common/ssg_pipe_reg.v \
+            rtl/kmer/ssg_reverse_complement.v \
+            rtl/kmer/ssg_canonical_lane.v \
+            rtl/dna/ssg_vector_kmer16.v \
+            rtl/kmer/ssg_vector_canonical16.v \
+            rtl/filter/ssg_target_bank16.v \
+            rtl/top/snowgenome_top.v \
+            tb/tb_snowgenome_top.v
+
+      - name: Run RTL simulation
+        run: vvp snowgenome_simv
+
+      - name: Run golden-model target check
+        run: |
+          python3 model/snowgenome_golden.py \
+            ACGTACGTACGTACGT \
+            --read-id 1 \
+            --target ACGTACGTACGTACG > golden.json
+          grep -q '"target_hits"' golden.json

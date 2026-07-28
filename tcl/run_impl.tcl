@@ -1,7 +1,7 @@
 set repo_root [file normalize [file join [file dirname [info script]] ..]]
 open_project $repo_root/build/snowgenome.xpr
 reset_run impl_1
-launch_runs impl_1 -to_step write_bitstream -jobs 8
+launch_runs impl_1 -to_step route_design -jobs 8
 wait_on_run impl_1
 open_run impl_1
 file mkdir $repo_root/reports/timing
@@ -14,3 +14,6 @@ report_utilization -file $repo_root/reports/utilization/post_impl_utilization.rp
 report_design_analysis -file $repo_root/reports/timing/post_impl_design_analysis.rpt
 report_clocks -file $repo_root/reports/clocks/report_clocks.rpt
 report_clock_interaction -file $repo_root/reports/clocks/report_clock_interaction.rpt
+report_exceptions -file $repo_root/reports/timing/post_impl_exceptions.rpt
+report_drc -file $repo_root/reports/timing/post_impl_drc.rpt
+write_checkpoint -force $repo_root/build/snowgenome_post_route.dcp

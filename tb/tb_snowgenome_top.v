@@ -1,167 +1,174 @@
 `timescale 1ps/1ps
 
 module tb_snowgenome_top;
-    localparam real IDEAL_PERIOD_PS = 3100.198;
     localparam integer K = 15;
+    localparam integer LANES = 16;
     localparam integer TARGET_COUNT = 4;
     localparam integer W = 2*K;
+    localparam real CLK_PERIOD_PS = 3200.0;
 
-    // target0 = ACGTACGTACGTACG, packed in stream order: oldest base at MSB in kmer.
-    localparam [W-1:0] TARGET0 = 30'h06C6C6C6;
-    localparam [W-1:0] TARGET1 = 30'h00000000;
-    localparam [W-1:0] TARGET2 = 30'h3FFFFFFF;
-    localparam [W-1:0] TARGET3 = 30'h15555555;
-    localparam [TARGET_COUNT*W-1:0] TARGET_KMERS = {TARGET3, TARGET2, TARGET1, TARGET0};
+    localparam [W-1:0] TARGET0 = 30'h06C6C6C6; // ACGTACGTACGTACG
+    localparam [W-1:0] TARGET1 = 30'h15555555; // CCCCCCCCCCCCCCC
+    localparam [W-1:0] TARGET2 = 30'h00156ABF; // AAAACCCCGGGGTTT
+    localparam [W-1:0] TARGET3 = 30'h09F29C36; // AGCTTAGGCTAATCG
+    localparam [TARGET_COUNT*W-1:0] TARGET_KMERS =
+        {TARGET3, TARGET2, TARGET1, TARGET0};
 
     reg clk_i = 1'b0;
     reg rst_i = 1'b1;
 
-    reg  [63:0] rx_data_i = 64'd0;
-    reg  [1:0]  rx_header_i = 2'b01;
-    reg         rx_valid_i = 1'b0;
-    reg         rx_block_lock_i = 1'b0;
-    wire        rx_ready_o;
+    reg                         dna_valid_i = 1'b0;
+    reg [2*LANES-1:0]           dna_data_i = {(2*LANES){1'b0}};
+    reg [LANES-1:0]             dna_known_i = {LANES{1'b0}};
+    reg [4:0]                   base_count_i = 5'd0;
+    reg                         read_start_i = 1'b0;
+    reg                         read_end_i = 1'b0;
+    reg [31:0]                  read_id_i = 32'd0;
 
-    wire                         event_valid_o;
-    wire [1:0]                   event_type_o;
-    wire [31:0]                  read_pos_o;
-    wire [63:0]                  event_kmer_o;
-    wire signed [15:0]           motif_score_o;
-    wire [TARGET_COUNT-1:0]      hit_vector_o;
-    wire                         bad_block_o;
+    wire                        target_beat_valid_o;
+    wire [LANES-1:0]            target_lane_valid_o;
+    wire [LANES*TARGET_COUNT-1:0] target_hit_matrix_o;
+    wire [31:0]                 target_beat_base_pos_o;
+    wire [31:0]                 target_read_id_o;
+    wire                        target_read_end_o;
+    wire                        protocol_error_o;
 
-    integer event_count;
-    integer target_hit_count;
-    integer motif_hit_count;
-    integer cycle_count;
-    integer guard;
+    integer output_count;
 
-    always #(IDEAL_PERIOD_PS/2.0) clk_i = ~clk_i;
+    always #(CLK_PERIOD_PS/2.0) clk_i = ~clk_i;
 
     snowgenome_top #(
         .K(K),
+        .LANES(LANES),
         .TARGET_COUNT(TARGET_COUNT),
-        .MOTIF_W(8),
-        .MOTIF_THRESHOLD(16'sd8),
+        .TARGET_BANK_SIZE(4),
         .TARGET_KMERS(TARGET_KMERS)
     ) dut (
-        .clk_i          (clk_i),
-        .rst_i          (rst_i),
-        .rx_data_i      (rx_data_i),
-        .rx_header_i    (rx_header_i),
-        .rx_valid_i     (rx_valid_i),
-        .rx_block_lock_i(rx_block_lock_i),
-        .rx_ready_o     (rx_ready_o),
-        .event_valid_o  (event_valid_o),
-        .event_type_o   (event_type_o),
-        .read_pos_o     (read_pos_o),
-        .event_kmer_o   (event_kmer_o),
-        .motif_score_o  (motif_score_o),
-        .hit_vector_o   (hit_vector_o),
-        .bad_block_o    (bad_block_o)
+        .clk_i                  (clk_i),
+        .rst_i                  (rst_i),
+        .dna_valid_i            (dna_valid_i),
+        .dna_data_i             (dna_data_i),
+        .dna_known_i            (dna_known_i),
+        .base_count_i           (base_count_i),
+        .read_start_i           (read_start_i),
+        .read_end_i             (read_end_i),
+        .read_id_i              (read_id_i),
+        .target_beat_valid_o     (target_beat_valid_o),
+        .target_lane_valid_o     (target_lane_valid_o),
+        .target_hit_matrix_o     (target_hit_matrix_o),
+        .target_beat_base_pos_o  (target_beat_base_pos_o),
+        .target_read_id_o        (target_read_id_o),
+        .target_read_end_o       (target_read_end_o),
+        .protocol_error_o        (protocol_error_o)
     );
 
-    function [1:0] enc_base;
-        input [7:0] ch;
+    task drive_single_beat_read;
+        input [31:0] id;
+        input [31:0] packed_bases;
+        input [15:0] known_mask;
         begin
-            case (ch)
-                "A": enc_base = 2'b00;
-                "C": enc_base = 2'b01;
-                "G": enc_base = 2'b10;
-                "T": enc_base = 2'b11;
-                default: enc_base = 2'b00;
-            endcase
-        end
-    endfunction
-
-    function [63:0] pack32;
-        input integer start_idx;
-        integer j;
-        reg [7:0] ch;
-        begin
-            pack32 = 64'd0;
-            for (j = 0; j < 32; j = j + 1) begin
-                case ((start_idx + j) % 4)
-                    0: ch = "A";
-                    1: ch = "C";
-                    2: ch = "G";
-                    3: ch = "T";
-                    default: ch = "A";
-                endcase
-                pack32[(2*j)+:2] = enc_base(ch);
-            end
-        end
-    endfunction
-
-    task send_word;
-        input [63:0] word;
-        begin
-            @(posedge clk_i);
-            while (!rx_ready_o) begin
-                @(posedge clk_i);
-            end
-            rx_data_i   <= word;
-            rx_header_i <= 2'b01;
-            rx_valid_i  <= 1'b1;
-            @(posedge clk_i);
-            rx_valid_i  <= 1'b0;
-            rx_data_i   <= 64'd0;
+            @(negedge clk_i);
+            dna_valid_i  = 1'b1;
+            dna_data_i   = packed_bases;
+            dna_known_i  = known_mask;
+            base_count_i = 5'd16;
+            read_start_i = 1'b1;
+            read_end_i   = 1'b1;
+            read_id_i    = id;
         end
     endtask
 
-    always @(posedge clk_i) begin
-        if (rst_i) begin
-            cycle_count      <= 0;
-            event_count      <= 0;
-            target_hit_count <= 0;
-            motif_hit_count  <= 0;
-        end else begin
-            cycle_count <= cycle_count + 1;
-            if (event_valid_o) begin
-                event_count <= event_count + 1;
-                if (|hit_vector_o) begin
-                    target_hit_count <= target_hit_count + 1;
+    task drive_idle;
+        begin
+            @(negedge clk_i);
+            dna_valid_i  = 1'b0;
+            dna_data_i   = 32'd0;
+            dna_known_i  = 16'd0;
+            base_count_i = 5'd0;
+            read_start_i = 1'b0;
+            read_end_i   = 1'b0;
+            read_id_i    = 32'd0;
+        end
+    endtask
+
+    always @(negedge clk_i) begin
+        if (!rst_i) begin
+            if (protocol_error_o) begin
+                $fatal(1, "Unexpected protocol_error_o");
+            end
+
+            if (target_beat_valid_o) begin
+                output_count = output_count + 1;
+
+                if (target_beat_base_pos_o !== 32'd0) begin
+                    $fatal(1, "Single-beat read must start at base position zero");
                 end
-                if (event_type_o[1]) begin
-                    motif_hit_count <= motif_hit_count + 1;
+                if (target_read_end_o !== 1'b1) begin
+                    $fatal(1, "Single-beat read must preserve read_end");
                 end
-                $display("EVENT cycle=%0d type=%b pos=%0d kmer=%h score=%0d hits=%b",
-                         cycle_count, event_type_o, read_pos_o, event_kmer_o, motif_score_o, hit_vector_o);
+                if (target_lane_valid_o[13:0] !== 14'd0) begin
+                    $fatal(1, "First beat generated a cross-boundary k-mer");
+                end
+
+                case (target_read_id_o)
+                    32'd1: begin
+                        if (target_lane_valid_o[15:14] !== 2'b11) begin
+                            $fatal(1, "Read 1 must produce exactly lanes 14 and 15");
+                        end
+                        if (!target_hit_matrix_o[(14*TARGET_COUNT)+0]) begin
+                            $fatal(1, "Read 1 lane 14 missed TARGET0");
+                        end
+                    end
+
+                    32'd2: begin
+                        if (target_lane_valid_o[15:14] !== 2'b00) begin
+                            $fatal(1, "N-containing k-mers were not suppressed");
+                        end
+                    end
+
+                    32'd3: begin
+                        if (target_lane_valid_o[15:14] !== 2'b11) begin
+                            $fatal(1, "Read 3 must produce exactly lanes 14 and 15");
+                        end
+                        if (!target_hit_matrix_o[(14*TARGET_COUNT)+1]) begin
+                            $fatal(1, "Read 3 lane 14 missed TARGET1");
+                        end
+                        if (!target_hit_matrix_o[(15*TARGET_COUNT)+1]) begin
+                            $fatal(1, "Read 3 lane 15 missed TARGET1");
+                        end
+                    end
+
+                    default: begin
+                        $fatal(1, "Unexpected output read_id=%0d", target_read_id_o);
+                    end
+                endcase
             end
         end
     end
 
     initial begin
-        event_count      = 0;
-        target_hit_count = 0;
-        motif_hit_count  = 0;
-        cycle_count      = 0;
-        guard            = 0;
+        output_count = 0;
 
-        repeat (10) @(posedge clk_i);
-        rst_i <= 1'b0;
-        rx_block_lock_i <= 1'b1;
-        repeat (4) @(posedge clk_i);
+        repeat (8) @(posedge clk_i);
+        @(negedge clk_i);
+        rst_i = 1'b0;
 
-        // Stream is ACGT repeated. TARGET0 should hit repeatedly after k-mer fill.
-        send_word(pack32(0));
-        send_word(pack32(32));
-        send_word(pack32(64));
-        send_word(pack32(96));
+        // Packed lane order is lane0 in bits [1:0], lane15 in bits [31:30].
+        drive_single_beat_read(32'd1, 32'hE4E4E4E4, 16'hFFFF);
 
-        for (guard = 0; guard < 300; guard = guard + 1) begin
-            @(posedge clk_i);
+        // Same physical bases as all-C, but lane7 is N/unknown.
+        drive_single_beat_read(32'd2, 32'h55555555, 16'hFF7F);
+
+        drive_single_beat_read(32'd3, 32'h55555555, 16'hFFFF);
+        drive_idle();
+
+        repeat (12) @(posedge clk_i);
+
+        if (output_count != 3) begin
+            $fatal(1, "Expected 3 output beats, observed %0d", output_count);
         end
 
-        if (target_hit_count == 0) begin
-            $fatal(1, "No target k-mer hit observed");
-        end
-
-        if (event_count == 0) begin
-            $fatal(1, "No event observed");
-        end
-
-        $display("PASS: events=%0d target_hits=%0d motif_hits=%0d", event_count, target_hit_count, motif_hit_count);
+        $display("PASS: vector16 read-boundary, N-mask, canonical target screening");
         $finish;
     end
 endmodule
