@@ -1,3 +1,3 @@
-# v0.1 is pure RTL and intentionally does not require vendor IP.
-# This file is kept as the future location for reproducible IP generation Tcl.
-puts "SnowGenome-64b66b v0.1 uses pure RTL; no IP generation required."
+# v0.2 public core is normalized RTL and intentionally does not publish
+# the production GTH Wizard/XCI or generated wrappers.
+puts "SnowGenome-64b66b v0.2 public core uses normalized RTL; private GT IP is excluded."
